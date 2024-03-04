@@ -12,7 +12,7 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l2_loss, ssim , l2_loss
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -22,6 +22,12 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from PIL import Image
+import numpy as np
+import torch.nn.functional as F
+import random
+import cv2
+import os
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -85,12 +91,78 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        if iteration % 2000 == 0:
+            # 获取全部的 get_xyz 张量
+            xyz_tensor = gaussians.get_xyz
 
-        # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        loss.backward()
+            # 将张量转换为 NumPy 数组
+            xyz_array = xyz_tensor.cpu().detach().numpy()
+
+            if os.path.exists('xyz_coordinates.txt'):
+                os.remove('xyz_coordinates.txt')
+                #print("remove over")
+            # 保存到文本文件
+            np.savetxt('xyz_coordinates.txt', xyz_array, fmt='%f')
+        
+        # 1:  模式1 将mask以外的值赋0
+        # 2:  模式2 将mask以外的值删除
+        # 3:  模式3 不做mask
+        mask_mode=1
+
+        if mask_mode == 1:
+        # 模式1：将掩码以外的值赋为0
+             # Loss
+            gt_image = viewpoint_cam.original_image.cuda()
+            # 创建与 gt_image 大小相同的掩码张量
+            height, width = gt_image.size(1), gt_image.size(2)
+
+            # 创建与 gt_image 大小相同的掩码张量
+            mask = torch.zeros((3, height, width), device=gt_image.device)
+
+            # 设置某些像素的值为 1
+            mask[0:500, 0:1600] = 1
+        
+            # 逐元素相乘
+            image *=mask
+            gt_image *=mask
+            
+            Ll2 = l2_loss(image, gt_image)
+            loss = (1.0 - opt.lambda_dssim) * Ll2 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+            loss.backward()
+        elif mask_mode == 2:
+            # 模式2：将掩码以外的值删除
+            # Loss
+            gt_image = viewpoint_cam.original_image.cuda()
+            # 创建与 gt_image 大小相同的掩码张量，获取 gt_image 的大小
+            height, width = gt_image.size(1), gt_image.size(2)
+
+            # 创建与 gt_image 大小相同的掩码张量
+            mask = torch.zeros((3, height, width), device=gt_image.device)
+
+            # 设置某些像素的值为 1
+            mask[0:500, 0:1600] = 1
+            # 创建一个掩码，选择值不等于0的元素
+            nonzero_mask = mask != 0
+
+            # 使用掩码选择非零元素
+            image_nonzero = torch.masked_select(image, nonzero_mask)
+            gt_image_nonzero = torch.masked_select(gt_image, nonzero_mask)
+
+            # 重新构造图像形状
+            image_nonzero = image_nonzero.view_as(image)
+            gt_image_nonzero = gt_image_nonzero.view_as(gt_image)
+
+            # 使用新的非零图像进行计算
+            Ll2 = l2_loss(image_nonzero, gt_image_nonzero)
+            loss = (1.0 - opt.lambda_dssim) * Ll2 + opt.lambda_dssim * (1.0 - ssim(image_nonzero, gt_image_nonzero))
+            loss.backward()
+        elif mask_mode == 3:
+            # Loss
+            gt_image = viewpoint_cam.original_image.cuda()
+            
+            Ll2 = l2_loss(image, gt_image)
+            loss = (1.0 - opt.lambda_dssim) * Ll2 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+            loss.backward()
 
         iter_end.record()
 
@@ -104,7 +176,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            training_report(tb_writer, iteration, Ll2, loss, l2_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -153,9 +225,9 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(tb_writer, iteration, Ll2, loss, l2_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
     if tb_writer:
-        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
+        tb_writer.add_scalar('train_loss_patches/l2_loss', Ll2.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
@@ -167,7 +239,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
-                l1_test = 0.0
+                l2_test = 0.0
                 psnr_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
@@ -176,13 +248,13 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
-                    l1_test += l1_loss(image, gt_image).mean().double()
+                    l2_test += l2_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                l2_test /= len(config['cameras'])          
+                print("\n[ITER {}] Evaluating {}: l2 {} PSNR {}".format(iteration, config['name'], l2_test, psnr_test))
                 if tb_writer:
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l2_loss', l2_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
 
         if tb_writer:
@@ -200,8 +272,8 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1_00,1_000,2_000,3_000,7_000, 15_000,20_000,25_000,30_000,100_000,200_000,300_000,400_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1_00,1_000,2_000,3_000,7_000, 15_000,20_000,25_000,30_000,100_000,200_000,300_000,400_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
