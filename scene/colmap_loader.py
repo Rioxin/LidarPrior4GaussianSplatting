@@ -244,55 +244,25 @@ def read_intrinsics_binary(path_to_model_file):
     return cameras
 
 def pose_rotation(pose):
-
     euler_angles = [pose["yaw"], pose["pitch"], pose["roll"]]
-    rotation = Rotation.from_euler('zyx', euler_angles)
+    rotation = Rotation.from_euler('ZYX', euler_angles)
 
     return rotation
 
 def pose_translation(pose):
-
     translation = np.array([pose["x"], pose["y"], pose["z"]])
 
     return translation
 
 def create_transform_matrix(rotation_matrix, translation_vector):
-    """
-    创建变换矩阵
-
-    参数：
-    - rotation_matrix: 3x3 的旋转矩阵
-    - translation_vector: 3 维的位移向量
-
-    返回：
-    - transform_matrix: 4x4 的变换矩阵
-    """
-    # 创建一个单位矩阵作为变换矩阵的基础
     transform_matrix = np.eye(4)
-
-    # 将旋转矩阵的内容复制到变换矩阵的左上角（3x3 子矩阵）
     transform_matrix[:3, :3] = rotation_matrix
-
-    # 将位移向量复制到变换矩阵的右侧（前三个元素）
     transform_matrix[:3, 3] = translation_vector
 
     return transform_matrix
 
 def decompose_transform_matrix(transform_matrix):
-    """
-    将变换矩阵分离为旋转矩阵和位移向量
-
-    参数：
-    - transform_matrix: 4x4 的变换矩阵
-
-    返回：
-    - rotation_matrix: 3x3 的旋转矩阵
-    - translation_vector: 3 维的位移向量
-    """
-    # 提取旋转矩阵（左上角的3x3子矩阵）
     rotation_matrix = transform_matrix[:3, :3]
-
-    # 提取位移向量（右侧的前三个元素）
     translation_vector = transform_matrix[:3, 3]
 
     return rotation_matrix, translation_vector
@@ -302,6 +272,16 @@ def pose_to_transform(pose):
     translation = pose_translation(pose)
     transform = create_transform_matrix(rotation,translation)
     return transform
+
+def transform_inv(transform):
+    rotation=transform[:3,:3]
+    rotation=rotation.T
+    translation=transform[:3,3]
+    translation=-rotation@translation
+    inv_transform=create_transform_matrix(rotation,translation)
+    return inv_transform
+
+
 
 def read_intrinsics_Json(path_to_model_file):
     """
@@ -313,54 +293,37 @@ def read_intrinsics_Json(path_to_model_file):
     # 假设文件路径为 path_to_json_file
     with open(path_to_model_file, 'r') as json_file: 
         data = json.load(json_file)
-        # 获取 run_params 列表中的第一个元素
         run_params = data["run_params"][0]
-        # 遍历 camera_params 列表
         for camera_params in run_params["camera_params"]:
-            # 获取 camera参数
             camera_id = camera_params["camera_id"]
             width = camera_params["width"]
             height = camera_params["height"]
             model = "PINHOLE"
             camera_matrix = camera_params["camera_matrix"]
-            #Colmap的内参是： fy": 686.5524553956232, "fx": 826.1663097380575
             params = [camera_matrix["fx"],camera_matrix["fy"],camera_matrix["cx"],camera_matrix["cy"]]
-            #params = [826.1663097380575,686.5524553956232,camera_matrix["cx"],camera_matrix["cy"]]
-            
-            
-            # 在这里可以使用 camera_id 进行其他操作 686.552455395623  
-            '''
-            print("Camera ID:", camera_id)
-            print("Camera width:", width)
-            print("Camera height:", height)
-            print("Camera model:", model)
-            print("Camera params:", params)
-            '''
-            #if(camera_id == "CAM_PBQ_FRONT_RIGHT" or camera_id == "CAM_PBQ_FRONT_LEFT" ):
-            if(1):
+           
+            if(camera_id == "CAM_PBQ_FRONT_LEFT"):
                 cameras[camera_id] = Camera(id=camera_id, model=model,
                                             width=width, height=height,
                                             params=params)
     return cameras
 
 def save_ply(points, filename):
-    vertices = np.array(points, dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
-    plydata = PlyData([PlyElement.describe(vertices, 'vertex')])
-    plydata.write(filename)
+    try:
+        vertices = np.array(points, dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
+        plydata = PlyData([PlyElement.describe(vertices, 'vertex')])
+        plydata.write(filename)
+    except Exception as e:
+        print(f"Error occurred while writing to the PLY file{e}")
 
 def read_extrinsics_Json(path_to_model_file):
-     # 读取 JSON 数据
     with open(path_to_model_file, 'r') as json_file: 
         data = json.load(json_file)
         images = {}
-        # 获取第一个轨迹
         trajectory = data["trajectories"][0]
-        # 在循环之前初始化计数器
         image_id = 0
-        # 初始化一个列表，用于存储所有tvec
         all_tvec_points = []
 
-        # 使用字典保存 camera_id 对应的 camera_to_vehicle
         camera_to_vehicle_pose = {}
         for run_param in data["run_params"]:
             for camera_param in run_param["camera_params"]:
@@ -368,64 +331,41 @@ def read_extrinsics_Json(path_to_model_file):
                     camera_to_vehicle = camera_param["camera_to_vehicle"]
                     camera_to_vehicle_pose[camera_id] = camera_to_vehicle
 
-            # 打印保存的字典
-            #print(camera_to_vehicle_pose['CAM_PBQ_FRONT_TELE']['x'])
-            # 遍历轨迹中的所有视图节点
         for view_node in trajectory["view_nodes"]:
-            #timestamp = view_node["timestamp"]
             timestamp = '{:.3f}'.format(view_node["timestamp"])
-
-            # 获取与之相关的相机对齐信息
             align_images_info = view_node["align_images_info"]
             vehicle_pose =  view_node["pose"]
             for align_info in align_images_info:
                 camera_id = align_info["camera_id"]
                 camera_pose = align_info["pose"]
-                
-                RR = np.array([ [ 0,  0, 1],
-                                [-1,  0, 0],
-                                [ 0, -1, 0]])
-                # 计算变换
+                RR = np.array([ [ 0,  -1, 0],
+                                [0,  0, -1],
+                                [ 1, 0, 0]])           
+
                 transform_vehicle_to_world = pose_to_transform(vehicle_pose)
-                transform_camera_align = pose_to_transform(camera_pose)
+                transform_camera_align = transform_inv(pose_to_transform(camera_pose))
                 transform_camera_to_vehicle = pose_to_transform(camera_to_vehicle_pose[camera_id])
-
-                transform_vehicle_to_world_plus = np.dot(transform_vehicle_to_world,transform_camera_align)
-                transform_camera_to_world = np.dot(transform_vehicle_to_world_plus,transform_camera_to_vehicle)
-                transform_camera_to_world[:3, :3] = np.dot(transform_camera_to_world[:3, :3],RR)
-                transform_world_to_camera = np.linalg.inv(transform_camera_to_world)
-                #print("inverse_matrix",inverse_matrix)
-
-
+                transform_camera_to_world = np.dot(transform_vehicle_to_world,np.dot(transform_camera_align,transform_camera_to_vehicle))
+              
+ 
+                transform_world_to_camera = transform_inv(transform_camera_to_world)
+                transform_test = transform_inv(transform_camera_to_world)
+                transform_world_to_camera[:3, :3] = np.dot(RR,transform_world_to_camera[:3, :3])
+                transform_world_to_camera[:3, 3] = np.dot(RR,transform_world_to_camera[:3, 3])
+ 
                 rotation_world_to_camera , translation_world_to_camera = decompose_transform_matrix(transform_world_to_camera)
-                #print("translation_world_to_camera",translation_world_to_camera)
-
-                
-                #rotation_world_to_camera = np.dot(np.linalg.inv(RR),rotation_world_to_camera)
-                qvec = Rotation.from_matrix(rotation_world_to_camera).as_quat()
-                #print("q1",qvec)
                 qvec = rotmat2qvec(rotation_world_to_camera)
-                #print("q2",qvec)
                 tvec = translation_world_to_camera
                 
                 image_name = "/" +str(timestamp) + "/" + camera_id + ".png"
-                #if(camera_id == "CAM_PBQ_FRONT_LEFT"  and image_id<=1000000):
-                #if(camera_id == "CAM_PBQ_FRONT_RIGHT" or camera_id == "CAM_PBQ_FRONT_LEFT" ):
-                if(image_id<=1000000):
+                if(camera_id == "CAM_PBQ_FRONT_LEFT"):
                     images[image_id] = Image(
                         id=image_id, qvec=qvec, tvec=tvec,
                         camera_id=camera_id, name=image_name,
                         xys=None, point3D_ids=None)
-                    #print("Camera camera_id:", camera_id)
-                    #r1 , t1 = decompose_transform_matrix(transform_camera_to_world)
-                    #print(tvec)
-                    # 将当前tvec添加到列表中
                     all_tvec_points.append(tuple(tvec))
-                    #print("rotation_world_to_camera",rotation_world_to_camera)
-                    # 每次循环后递增计数器
                     image_id += 1
-    # 保存所有tvec到PLY文件
-    save_ply(all_tvec_points, 'output_point_cloud.ply')
+    save_ply(all_tvec_points, 'home/qcraft/gaussian_splatting/output_point_cloud.ply')
     return images
 def read_extrinsics_text(path):
     """

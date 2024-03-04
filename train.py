@@ -34,6 +34,45 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+def save_image_local(ori_image,save_path):
+    cv_image=cv2.cvtColor(ori_image.permute(1,2,0).cpu().detach().numpy()*255.0,cv2.COLOR_RGB2BGR)
+    cv2.imwrite(save_path,cv_image)
+
+def render_python(viewpoint_cam, gaussians):
+    height = viewpoint_cam.image_height
+    width = viewpoint_cam.image_width
+    Fx = viewpoint_cam.Fx * width
+    Fy = viewpoint_cam.Fy * height
+    Cx = viewpoint_cam.cx * width
+    Cy = viewpoint_cam.cy * height
+    R, t = viewpoint_cam.R, viewpoint_cam.T
+
+    # 构建变换矩阵
+    TR = np.eye(4)
+    TR[:3, :3] = R.T
+    TR[:3, 3] = t
+
+
+    image = torch.zeros(height, width, 3, dtype=torch.float32)
+
+    for point in gaussians._xyz:
+        point_cpu = point.detach().cpu().numpy()
+        p_hom = TR[:3, :3]@point_cpu+ TR[:3, 3]
+        
+        if p_hom[2] < 0 :
+            continue
+
+        if(p_hom[2]==0):
+            p_hom[2]=0.000000001
+
+        p_proj = [p_hom[0] * Fx / p_hom[2] + Cx,
+                  p_hom[1] * Fy / p_hom[2] + Cy]
+        if 0 <= p_proj[0] < width and 0 <= p_proj[1] < height:
+            image[int(p_proj[1]), int(p_proj[0]), :] = 1.0
+
+    image = image.permute(2, 0, 1)
+    return image
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -91,79 +130,59 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        if iteration % 2000 == 0:
-            # 获取全部的 get_xyz 张量
-            xyz_tensor = gaussians.get_xyz
-
-            # 将张量转换为 NumPy 数组
-            xyz_array = xyz_tensor.cpu().detach().numpy()
-
-            if os.path.exists('xyz_coordinates.txt'):
-                os.remove('xyz_coordinates.txt')
-                #print("remove over")
-            # 保存到文本文件
-            np.savetxt('xyz_coordinates.txt', xyz_array, fmt='%f')
         
-        # 1:  模式1 将mask以外的值赋0
-        # 2:  模式2 将mask以外的值删除
-        # 3:  模式3 不做mask
-        mask_mode=1
+      
+        # Loss
+        gt_image = viewpoint_cam.original_image.cuda()
+        height, width = gt_image.size(1), gt_image.size(2)
 
-        if mask_mode == 1:
-        # 模式1：将掩码以外的值赋为0
-             # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
-            # 创建与 gt_image 大小相同的掩码张量
-            height, width = gt_image.size(1), gt_image.size(2)
+        mask = torch.zeros((3, height, width), device=gt_image.device)
 
-            # 创建与 gt_image 大小相同的掩码张量
-            mask = torch.zeros((3, height, width), device=gt_image.device)
-
-            # 设置某些像素的值为 1
-            mask[0:500, 0:1600] = 1
-        
-            # 逐元素相乘
+        if (viewpoint_cam.colmap_id == "CAM_PBQ_FRONT_WIDE" ):
+            mask[:, 0:2*height//3, 0:width] = 1
+            image *=mask
+            gt_image *=mask 
+        elif (viewpoint_cam.colmap_id == "CAM_PBQ_REAR"):
+            mask[:, 0:4*height//5, 0:width] = 1
             image *=mask
             gt_image *=mask
-            
-            Ll2 = l2_loss(image, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * Ll2 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-            loss.backward()
-        elif mask_mode == 2:
-            # 模式2：将掩码以外的值删除
-            # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
-            # 创建与 gt_image 大小相同的掩码张量，获取 gt_image 的大小
-            height, width = gt_image.size(1), gt_image.size(2)
+        elif (viewpoint_cam.colmap_id == "CAM_PBQ_REAR_LEFT"):
+            pass
+            mask[:, 0:height, 1*width//3:width] = 1
+            image *=mask
+            gt_image *=mask 
+        elif (viewpoint_cam.colmap_id == "CAM_PBQ_REAR_RIGHT"):
+            mask[:, 0:height, 0:2*width//3] = 1
+            image *=mask
+            gt_image *=mask
+        elif (viewpoint_cam.colmap_id == "CAM_PBQ_FRONT_FISHEYE"):
+            mask[:, 2*height//3:height, 0:width] = 1
+            image *=mask
+            gt_image *=mask
+        elif (viewpoint_cam.colmap_id == "CAM_PBQ_LEFT_FISHEYE"):
+            mask[:, 2*height//3:height, 0:width] = 1
+            image *=mask
+            gt_image *=mask
+        elif (viewpoint_cam.colmap_id == "CAM_PBQ_REAR_FISHEYE"):
+            mask[:, 2*height//3:height, 0:width] = 1
+            image *=mask
+            gt_image *=mask
+        elif (viewpoint_cam.colmap_id == "CAM_PBQ_RIGHT_FISHEYE"):
+            mask[:, 2*height//3:height, 0:width] = 1
+            image *=mask
+            gt_image *=mask
 
-            # 创建与 gt_image 大小相同的掩码张量
-            mask = torch.zeros((3, height, width), device=gt_image.device)
-
-            # 设置某些像素的值为 1
-            mask[0:500, 0:1600] = 1
-            # 创建一个掩码，选择值不等于0的元素
-            nonzero_mask = mask != 0
-
-            # 使用掩码选择非零元素
-            image_nonzero = torch.masked_select(image, nonzero_mask)
-            gt_image_nonzero = torch.masked_select(gt_image, nonzero_mask)
-
-            # 重新构造图像形状
-            image_nonzero = image_nonzero.view_as(image)
-            gt_image_nonzero = gt_image_nonzero.view_as(gt_image)
-
-            # 使用新的非零图像进行计算
-            Ll2 = l2_loss(image_nonzero, gt_image_nonzero)
-            loss = (1.0 - opt.lambda_dssim) * Ll2 + opt.lambda_dssim * (1.0 - ssim(image_nonzero, gt_image_nonzero))
-            loss.backward()
-        elif mask_mode == 3:
-            # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
-            
-            Ll2 = l2_loss(image, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * Ll2 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-            loss.backward()
-
+        save_flag = 0             
+        if(save_flag==1):    
+            test_image=render_python(viewpoint_cam, gaussians)
+            save_image_local(test_image,"/home/qcraft/Gaussian_Splatting_WS/fix_pro/test.jpg")
+            save_image_local(gt_image,"/home/qcraft/Gaussian_Splatting_WS/fix_pro/gt.jpg")
+            save_image_local(image,"/home/qcraft//Gaussian_Splatting_WS/fix_pro/pred.jpg")
+            import sys
+            sys.exit()
+        Ll2 = l2_loss(image, gt_image)
+        loss = (1.0 - opt.lambda_dssim) * Ll2 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        loss.backward()
         iter_end.record()
 
         with torch.no_grad():

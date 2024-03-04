@@ -31,6 +31,8 @@ class CameraInfo(NamedTuple):
     FovX: np.array
     cx: np.array
     cy: np.array
+    fx: np.array
+    fy: np.array
     image: np.array
     image_path: str
     image_name: str
@@ -82,9 +84,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
 
         uid = intr.id
         R = np.transpose(qvec2rotmat(extr.qvec))
-        #print(R.T)
         T = np.array(extr.tvec)
-        #print(T)
         if intr.model=="SIMPLE_PINHOLE":
             focal_length_x = intr.params[0]
             FovY = focal2fov(focal_length_x, height)
@@ -92,28 +92,20 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         elif intr.model=="PINHOLE":
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
-            cx = intr.params[2]
-            cy = intr.params[3]
+            fx = intr.params[0] / width
+            fy = intr.params[1] / height
+            cx = intr.params[2] / width
+            cy = intr.params[3] / height 
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
         else:
             assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
-        cx = (cx - width / 2) / width * 2
-        cy = (cy - height / 2) / height * 2
         image_path = images_folder + extr.name
-        #print(image_path)
-        '''
-        print("Camera images_folder:", images_folder)
-        print("Camera name:", extr.name)
-        print("Camera image_path:", image_path)
-        '''
         image_name = os.path.basename(image_path).split(".")[0]
         image = Image.open(image_path)
 
-        #cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-        #                      image_path=image_path, image_name=image_name, width=width, height=height)
-        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, cx=cx, cy=cy, image=image,
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, cx=cx, cy=cy, fx=fx,fy=fy,image=image,
                               image_path=image_path, image_name=image_name, width=width, height=height)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
